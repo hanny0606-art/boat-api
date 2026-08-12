@@ -2,8 +2,8 @@ name: Sunsang24 Auto Scraper
 
 on:
   schedule:
-    - cron: '0 */1 * * *' # 1시간마다 자동 실행
-  workflow_dispatch: # 수동 실행 버튼 활성화
+    - cron: '0 0 * * *' # 매일 1회 자동 수집 (GitHub 무료 한도 보호)
+  workflow_dispatch: # 수동 실행 버튼
 
 jobs:
   collect:
@@ -19,7 +19,7 @@ jobs:
 
       - name: 필요 라이브러리 설치
         run: |
-          pip install requests beautifulsoup4 supabase
+          pip install requests beautifulsoup4 supabase pandas openpyxl
 
       - name: 스크래퍼 실행 및 Supabase DB 저장
         run: |
