@@ -17,7 +17,6 @@ def get_live_reservations(
     yyyymm: str = "202608",
     debug: bool = False
 ):
-    # 스캔으로 발견된 선박 전용 일정 API 엔드포인트 목록
     urls_to_try = [
         f"https://{subdomain}.sunsang24.com/ship/schedule/{ship_id}?yyyymm={yyyymm}",
         f"https://{subdomain}.sunsang24.com/ship/event_list?yyyymm={yyyymm}&ship_id={ship_id}",
@@ -29,6 +28,7 @@ def get_live_reservations(
     req_headers['Origin'] = f"https://{subdomain}.sunsang24.com"
 
     debug_logs = {}
+    formatted_yyyymm = f"{yyyymm[:4]}-{yyyymm[4:6]}"  # 예: "2026-08"
 
     for target_url in urls_to_try:
         try:
@@ -38,7 +38,6 @@ def get_live_reservations(
                     data = res.json()
                     debug_logs[target_url] = data
                     
-                    # JSON 데이터 파싱
                     raw_list = data.get("data") if isinstance(data, dict) else data
                     if isinstance(raw_list, list) and len(raw_list) > 0:
                         cleaned = []
@@ -46,12 +45,17 @@ def get_live_reservations(
                             if not isinstance(item, dict):
                                 continue
                                 
-                            # 공지사항 제외 및 유효 일정 필터링
-                            is_notice = item.get("is_notice") or item.get("is_popup")
-                            event_date = item.get("event_sdate") or item.get("sdate") or item.get("date") or ""
+                            # 1. 공지사항 / 팝업 무조건 제외
+                            if item.get("is_notice") is True or item.get("is_popup") is True:
+                                continue
+                                
                             title = item.get("title") or item.get("fish_type") or item.get("subject") or ""
-                            
-                            if is_notice and not event_date:
+                            if "환불" in title or "공지" in title or "안내" in title:
+                                continue
+
+                            event_date = item.get("event_sdate") or item.get("sdate") or item.get("date") or ""
+                            # 2. 요청 연월(예: 2026-08)과 일치하지 않는 과거 날짜 제외
+                            if formatted_yyyymm not in event_date:
                                 continue
 
                             rem_seat = int(item.get("rem_cnt") or item.get("person_rem") or item.get("left_seat") or 0)
@@ -59,21 +63,19 @@ def get_live_reservations(
                             price = int(item.get("price") or item.get("person_price") or item.get("fee") or 0)
                             ship_name = item.get("ship_name") or "신출항호"
                             
-                            if event_date or title:
-                                cleaned.append({
-                                    "schedule_no": item.get("no") or item.get("ship_schedule_no") or item.get("id"),
-                                    "ship_id": ship_id,
-                                    "ship_name": ship_name,
-                                    "event_date": event_date,
-                                    "title": title,
-                                    "max_seat": max_seat,
-                                    "rem_seat": rem_seat,
-                                    "price": price,
-                                    "ready": rem_seat > 0 or bool(title),
-                                    "booking_url": f"https://{subdomain}.sunsang24.com/"
-                                })
+                            cleaned.append({
+                                "schedule_no": item.get("no") or item.get("ship_schedule_no") or item.get("id"),
+                                "ship_id": ship_id,
+                                "ship_name": ship_name,
+                                "event_date": event_date,
+                                "title": title,
+                                "max_seat": max_seat,
+                                "rem_seat": rem_seat,
+                                "price": price,
+                                "ready": rem_seat > 0 or bool(title),
+                                "booking_url": f"https://{subdomain}.sunsang24.com/"
+                            })
                         
-                        # 정제된 결과가 존재하면 성공 반환 (debug 모드가 아닐 때)
                         if cleaned and not debug:
                             return {
                                 "status": "success",
@@ -84,16 +86,13 @@ def get_live_reservations(
                                 "data": cleaned
                             }
                 except Exception:
-                    debug_logs[target_url] = res.text[:200]
+                    debug_logs[target_url] = res.text[:300]
         except Exception as e:
             debug_logs[target_url] = str(e)
 
-    if debug:
-        return {"status": "debug_mode", "responses": debug_logs}
-
     return {
-        "status": "error",
-        "message": "데이터 수집 실패. ?debug=true로 각 엔드포인트 응답을 확인하세요.",
+        "status": "debug_mode" if debug else "no_data_filtered",
+        "message": "필터링 후 유효 데이터가 없거나 debug 모드입니다. 아래 각 URL 원본 데이터를 확인하세요.",
         "debug_logs": debug_logs
     }
 
