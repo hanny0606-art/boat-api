@@ -1,18 +1,17 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 import requests
 from bs4 import BeautifulSoup
 import re
 import uvicorn
+from typing import List, Optional
+from datetime import datetime
 
 app = FastAPI()
 
 SCRAPER_API_KEY = "31410731f1e2583c1a2bbbd532c282ea"
 
-# 해당 선사(대박호 계열)의 실제 등록된 선박 이름 명단
-VALID_SHIPS = ["뉴항구호", "뉴항구1호", "레전드호"]
-
-@app.get("/api/v1/reservations")
-def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
+# 단일 선사/선박 스크래핑 함수
+def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: Optional[List[str]] = None):
     target_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
     
     scraper_url = "https://api.scraperapi.com"
@@ -26,7 +25,7 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
     try:
         res = requests.get(scraper_url, params=params, timeout=60)
         if res.status_code != 200:
-            return {"status": "error", "message": f"ScraperAPI 응답 실패 (코드: {res.status_code})"}
+            return []
 
         html_text = res.text
         soup = BeautifulSoup(html_text, 'html.parser')
@@ -37,7 +36,6 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
         year_str = yyyymm[:4]
         cleaned_results = []
 
-        # 1. 날짜별 위치 스캔
         date_matches = list(re.finditer(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', normalized_text))
 
         for i in range(len(date_matches)):
@@ -50,8 +48,12 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
             end_idx = date_matches[i+1].start() if i + 1 < len(date_matches) else len(normalized_text)
             section_text = normalized_text[start_idx:end_idx]
 
-            # 2. 지정된 진짜 배 이름(`VALID_SHIPS`) 위치만 스캔
-            ship_pattern = r'(' + '|'.join(VALID_SHIPS) + r')'
+            # 등록된 선박명이 주어진 경우 해당 배만, 없으면 '호' 패턴 자동 탐색
+            if valid_ships and len(valid_ships) > 0:
+                ship_pattern = r'(' + '|'.join(valid_ships) + r')'
+            else:
+                ship_pattern = r'([가-힣A-Za-z0-9]+호)'
+
             ship_matches = list(re.finditer(ship_pattern, section_text))
 
             for j in range(len(ship_matches)):
@@ -62,21 +64,17 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
                 s_end = ship_matches[j+1].start() if j + 1 < len(ship_matches) else len(section_text)
                 ship_block = section_text[s_start:s_end]
 
-                # 어종 정밀 추출 ("어종 : 주꾸미,갑오징어 / 루어" -> "주꾸미,갑오징어")
                 title = "출항 일정"
                 fish_match = re.search(r'어종\s*[:\s]*([^/|\n\r<]+)', ship_block)
                 if fish_match:
                     raw_title = fish_match.group(1).strip()
-                    # 불필요한 부가 텍스트 제거
                     title = raw_title.split('운항시간')[0].split('예약')[0].strip()
 
-                # 남은 자리 추출
                 rem_seat = 0
                 rem_match = re.search(r'남은자리\s*[:\s]*(\d+)', ship_block) or re.search(r'(\d+)\s*명\s*남음', ship_block)
                 if rem_match:
                     rem_seat = int(rem_match.group(1))
 
-                # 정원 추출
                 max_seat = 0
                 max_match = re.search(r'정원\s*[:\s]*(\d+)', ship_block) or re.search(r'(\d+)\s*명\s*정원', ship_block) or re.search(r'(\d+)\s*명\s*예약', ship_block)
                 if max_match:
@@ -89,13 +87,13 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
                     "ship_name": ship_name,
                     "event_date": event_date,
                     "title": title or "출항 일정",
-                    "max_seat": max_seat if max_seat > 0 else (20 if "뉴항구" in ship_name else 11),
+                    "max_seat": max_seat if max_seat > 0 else 20,
                     "rem_seat": 0 if is_closed else rem_seat,
                     "ready": not is_closed and rem_seat > 0,
-                    "booking_url": target_url
+                    "booking_url": target_url,
+                    "updated_at": datetime.now().isoformat()
                 })
 
-        # 중복 정제
         seen = set()
         unique_results = []
         for item in cleaned_results:
@@ -104,16 +102,46 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
                 seen.add(key)
                 unique_results.append(item)
 
-        return {
-            "status": "success",
-            "subdomain": subdomain,
-            "yyyymm": yyyymm,
-            "count": len(unique_results),
-            "data": unique_results
-        }
+        return unique_results
+    except Exception:
+        return []
 
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+# 단일 선사 조회 엔드포인트
+@app.get("/api/v1/reservations")
+def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609", valid_ships: Optional[str] = None):
+    ship_list = valid_ships.split(",") if valid_ships else None
+    data = scrape_sunsang24(subdomain, yyyymm, ship_list)
+    return {
+        "status": "success",
+        "subdomain": subdomain,
+        "yyyymm": yyyymm,
+        "count": len(data),
+        "data": data
+    }
+
+# list.xlsx 내 전체 선사 일괄 수집 전용 엔드포인트
+@app.post("/api/v1/batch-collect")
+def batch_collect_all(targets: List[dict], yyyymm: str = "202609"):
+    """
+    targets 구조 예시 (list.xlsx 기반):
+    [
+      {"subdomain": "daebak", "ships": ["뉴항구호", "뉴항구1호", "레전드호"]},
+      {"subdomain": "seojin", "ships": ["신출항호", "서진호"]}
+    ]
+    """
+    total_data = []
+    for target in targets:
+        subdomain = target.get("subdomain")
+        ships = target.get("ships", [])
+        results = scrape_sunsang24(subdomain, yyyymm, ships)
+        total_data.extend(results)
+
+    # TODO: 여기에 Supabase / Firebase / DB Insert 로직 연동
+    return {
+        "status": "batch_success",
+        "total_collected": len(total_data),
+        "data": total_data
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
