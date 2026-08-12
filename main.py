@@ -11,6 +11,9 @@ HEADERS = {
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
+# 제외할 공지/조황 관련 키워드 리스트
+EXCLUDE_KEYWORDS = ["이벤트", "공지", "알림", "조황", "전체보기", "안내", "환불", "팝업", "규정"]
+
 @app.get("/api/v1/reservations")
 def get_live_reservations(
     subdomain: str = "daebak", 
@@ -19,7 +22,7 @@ def get_live_reservations(
     start_date: str = None,
     end_date: str = None
 ):
-    # 날짜 범위 자동 계산
+    # 날짜 범위 자동 계산 (기본값: 지정 연월의 1일~말일)
     if not start_date or not end_date:
         try:
             year = int(yyyymm[:4])
@@ -31,10 +34,10 @@ def get_live_reservations(
             start_date = "2026-09-01"
             end_date = "2026-09-30"
 
-    # 1. 스크린샷 1의 진짜 일정/어종 API (service.sunsang24.com)
+    # 1. 어종/선비/정원 상세 데이터 API
     info_url = f"https://service.sunsang24.com/v1/customer/event_list/{ship_id}?rows=100&yyyymm={yyyymm}"
     
-    # 2. 스크린샷 2의 예약 현황 API
+    # 2. 실시간 예약 달력 API
     res_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet_reservation/{start_date}/{end_date}"
 
     req_headers = HEADERS.copy()
@@ -42,28 +45,36 @@ def get_live_reservations(
     req_headers['Origin'] = f"https://{subdomain}.sunsang24.com"
 
     try:
-        # A. 일정 기본 정보 수집 (어종, 선비, 정원 등)
+        # A. 어종 및 일정 세부 정보 추출
         info_dict = {}
-        res_info = requests.get(info_url, headers=HEADERS, timeout=5)
+        res_info = requests.get(info_url, headers=HEADERS, timeout=6)
         if res_info.status_code == 200:
             raw_info = res_info.json()
             if isinstance(raw_info, list):
                 for item in raw_info:
-                    if item.get("is_notice") or item.get("is_popup"):
+                    # 공지사항 / 팝업 플래그 제외
+                    if item.get("is_notice") is True or item.get("is_popup") is True:
                         continue
+
+                    title = item.get("title") or item.get("fish_type") or item.get("subject") or ""
+                    
+                    # 제목에 공지/조황 키워드가 포함되면 무조건 제외
+                    if any(kw in title for kw in EXCLUDE_KEYWORDS):
+                        continue
+
                     sdate = item.get("event_sdate") or item.get("date") or ""
                     if sdate:
                         info_dict[sdate] = {
-                            "title": item.get("title") or item.get("fish_type") or "",
+                            "title": title,
                             "max_seat": int(item.get("max_cnt") or item.get("total_seat") or 0),
                             "rem_seat": int(item.get("rem_cnt") or item.get("left_seat") or 0),
                             "price": int(item.get("price") or item.get("fee") or 0),
                             "ship_name": item.get("ship_name") or "대박호"
                         }
 
-        # B. 예약 현황 데이터 수집 및 결합
+        # B. 예약 달력 데이터 수집 및 결합
         cleaned_results = []
-        res_fleet = requests.get(res_url, headers=req_headers, timeout=5)
+        res_fleet = requests.get(res_url, headers=req_headers, timeout=6)
         
         if res_fleet.status_code == 200:
             fleet_json = res_fleet.json()
@@ -71,25 +82,27 @@ def get_live_reservations(
             
             for item in raw_list:
                 sdate = item.get("sdate", "")
+                if not sdate:
+                    continue
+
                 schedule_no = item.get("ship_schedule_no") or item.get("no")
-                
-                # 정보 결합
                 detail = info_dict.get(sdate, {})
-                
+                title = detail.get("title", "")
+
+                # 공지 키워드가 필터링된 유효 어종 데이터만 수집
                 ready = bool(
                     item.get("reservation_fishing_ready") or 
-                    item.get("reservation_ready") or 
                     detail.get("rem_seat", 0) > 0 or 
-                    bool(detail.get("title"))
+                    bool(title)
                 )
 
                 cleaned_results.append({
                     "schedule_no": schedule_no,
                     "subdomain": subdomain,
                     "ship_id": ship_id,
-                    "ship_name": detail.get("ship_name", "선박"),
+                    "ship_name": detail.get("ship_name", "대박호"),
                     "event_date": sdate,
-                    "title": detail.get("title", ""),
+                    "title": title,
                     "max_seat": detail.get("max_seat", 0),
                     "rem_seat": detail.get("rem_seat", 0),
                     "price": detail.get("price", 0),
