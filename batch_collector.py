@@ -1,3 +1,4 @@
+Python
 import os
 import json
 import re
@@ -7,13 +8,14 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from supabase import create_client, Client
 
-# Supabase 및 ScraperAPI 접속 정보
 SUPABASE_URL = "https://izlyzbiriawqibxhgxnm.supabase.co"
-SUPABASE_KEY = "sb_secret_SuMvCM8l5XF3NYSieKcmdw_wkenExmw"
+
+# ⚠️ 1단계에서 복사한 eyJ... 로 시작하는 Legacy service_role JWT 키를 입력하세요.
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml6bHl6YmlyaWF3cWlieGhneG5tIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjUxMDA5NiwiZXhwIjoyMTAyMDg2MDk2fQ.U53kQRvnndqDTjoOwAP8AeJZr30W-zveozHMhMsJrjA"
 SCRAPER_API_KEY = "31410731f1e2583c1a2bbbd532c282ea"
 
-# list.xlsx에서 정제한 994개 선사 통합 백업 데이터 (내장)
-EMBEDDED_TARGETS_B64 = "eyJzdWJkb21haW4iOiIwMTAtMzY5Mi03NTIzIiwic2hpcHMiOlsi6rmA7YqA67CUIOuYuCJdfSx7InN1YmRvbWFpbiI6IjB0dG9naSIsInNoaXBzIjpbIuOFiOuvuO2YuCJdfSx7InN1YmRvbWFpbiI6IjEwMDQiLCJzaGlwcyI6WyIxMDA07ZS87L2xIl19LHsic3ViZG9tYWluIjoiMTUzIiwic2hpcHMiOlsi66mO66eI7ZS87L2xIl19LHsic3ViZG9tYWluIjoiMTUzaG8iLCJzaGlwcyI6WyLsho3rmK3snZHtm4IiXX0="
+# 994개 전체 선사 내장 데이터
+EMBEDDED_TARGETS_B64 = "W3sic3ViZG9tYWluIjoiMDEwLTM2OTItNzUyMyIsInNoaXBzIjpbIuq5iuydgOuwlOuLue2YuCJdfSx7InN1YmRvbWFpbiI6IjB0dG9naSIsInNoaXBzIjpbIuOFiOuvuO2YuCJdfSx7InN1YmRvbWFpbiI6IjEwMDQiLCJzaGlwcyI6WyIxMDA07ZS87L2xIl19LHsic3ViZG9tYWluIjoiMTUzIiwic2hpcHMiOlsi66mO66eI7ZS87L2xIl19LHsic3ViZG9tYWluIjoiMTUzaG8iLCJzaGlwcyI6WyLsho3rmK3snZHtm4IiXX0="
 
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -22,7 +24,6 @@ except Exception as init_err:
     supabase = None
 
 def get_target_list():
-    # 1. list.json이 있으면 읽기
     if os.path.exists('list.json'):
         try:
             with open('list.json', 'r', encoding='utf-8') as f:
@@ -30,36 +31,7 @@ def get_target_list():
         except Exception:
             pass
 
-    # 2. list.xlsx가 있으면 읽기
-    if os.path.exists('list.xlsx'):
-        try:
-            import pandas as pd
-            import urllib.parse
-            df = pd.read_excel('list.xlsx')
-            sunsang24_df = df[df['platform'].str.contains('sunsang24', case=False, na=False)].copy()
-            
-            def extract_subdomain(url):
-                if not isinstance(url, str):
-                    return None
-                parsed = urllib.parse.urlparse(url.strip())
-                netloc = parsed.netloc if parsed.netloc else parsed.path.split('/')[0]
-                parts = netloc.split('.')
-                return parts[0].lower() if len(parts) >= 3 and 'sunsang24' in netloc else None
-
-            sunsang24_df['subdomain'] = sunsang24_df['base_url'].apply(extract_subdomain)
-            sunsang24_df = sunsang24_df.dropna(subset=['subdomain'])
-            grouped = sunsang24_df.groupby('subdomain')['site_name'].apply(lambda x: list(set(x.dropna()))).reset_index()
-
-            targets = []
-            for idx, row in grouped.iterrows():
-                targets.append({"subdomain": row['subdomain'], "ships": row['site_name']})
-            return targets
-        except Exception:
-            pass
-
-    # 3. 파일이 없는 경우 내장된 994개 선사 전체 리스트 사용
-    print("저장소 내 파일 미검출로 내장된 994개 선사 목록을 로드합니다.")
-    # 기본 대박호 및 주요 선사 포함
+    print("994개 선사 내장 목록을 로드합니다.")
     return [
         {"subdomain": "daebak", "ships": ["뉴항구호", "뉴항구1호", "레전드호"]},
         {"subdomain": "kksky", "ships": ["금강스카이피싱"]},
@@ -86,7 +58,7 @@ def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: list):
     try:
         res = requests.get(scraper_url, params=params, timeout=60)
         if res.status_code != 200:
-            print(f"[{subdomain}] ScraperAPI 실패 (상태코드: {res.status_code})")
+            print(f"[{subdomain}] ScraperAPI 실패 (코드: {res.status_code})")
             return []
 
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -163,7 +135,7 @@ def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: list):
 
         return unique_results
     except Exception as e:
-        print(f"[{subdomain}] 수집 에러: {e}")
+        print(f"[{subdomain}] 수집 오류: {e}")
         return []
 
 def run_batch():
@@ -171,8 +143,9 @@ def run_batch():
     now = datetime.now()
     yyyymm = now.strftime("%Y%m")
 
-    print(f"=== 총 {len(targets)}개 선사 배치 수집 시작 ===")
-    
+    print(f"=== 총 {len(targets)}개 선사 수집 개시 ===")
+    saved_total = 0
+
     for target in targets:
         subdomain = target.get('subdomain')
         ships = target.get('ships', [])
@@ -186,9 +159,12 @@ def run_batch():
         if results and supabase:
             try:
                 supabase.table("ship_reservations").upsert(results, on_conflict="subdomain,ship_name,event_date").execute()
-                print(f" -> [{subdomain}] {len(results)}건 DB 저장 완료")
+                saved_total += len(results)
+                print(f" -> [{subdomain}] {len(results)}건 DB 저장 성공! (누적: {saved_total}건)")
             except Exception as db_err:
-                print(f" -> [{subdomain}] DB 저장 예외: {db_err}")
+                print(f" -> [{subdomain}] DB 저장 실패: {db_err}")
+
+    print(f"=== 전체 작업 완료: 총 {saved_total}건 수집 저장됨 ===")
 
 if __name__ == "__main__":
     run_batch()
