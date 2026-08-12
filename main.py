@@ -30,7 +30,6 @@ def get_live_reservations(
     start_date: str = None,
     end_date: str = None
 ):
-    # start_date 기반 yyyymm 자동 추출
     if start_date and not yyyymm:
         yyyymm = start_date.replace("-", "")[:6]
     elif not yyyymm:
@@ -47,9 +46,7 @@ def get_live_reservations(
             start_date = "2026-09-01"
             end_date = "2026-09-30"
 
-    # 1. 상세 일정/어종 API
     info_url = f"https://service.sunsang24.com/v1/customer/event_list/{ship_id}?rows=100&yyyymm={yyyymm}"
-    # 2. 예약 달력 API
     res_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet_reservation/{start_date}/{end_date}"
 
     req_headers = HEADERS.copy()
@@ -57,7 +54,6 @@ def get_live_reservations(
     req_headers['Origin'] = f"https://{subdomain}.sunsang24.com"
 
     try:
-        # A. 어종 및 일정 세부 정보 추출 (이중 매핑 구조)
         info_by_no = {}
         info_by_date = {}
 
@@ -65,7 +61,6 @@ def get_live_reservations(
         if res_info.status_code == 200:
             raw_data = res_info.json()
             
-            # JSON 응답 객체/배열 자동 분해
             if isinstance(raw_data, dict):
                 raw_list = raw_data.get("data") or raw_data.get("list") or []
             elif isinstance(raw_data, list):
@@ -100,7 +95,6 @@ def get_live_reservations(
                 if sdate:
                     info_by_date[sdate] = item_detail
 
-        # B. 예약 달력 데이터 수집 및 결합
         cleaned_results = []
         res_fleet = requests.get(res_url, headers=req_headers, timeout=6)
         
@@ -115,7 +109,6 @@ def get_live_reservations(
                 sdate = clean_date(item.get("sdate", ""))
                 sched_no = str(item.get("ship_schedule_no") or item.get("no") or "")
 
-                # 고유번호 우선 매칭 ➔ 날짜 기준 2차 매칭
                 detail = info_by_no.get(sched_no) or info_by_date.get(sdate) or {}
 
                 ready = bool(
