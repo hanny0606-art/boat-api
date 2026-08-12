@@ -2,21 +2,62 @@ import os
 import json
 import re
 import requests
+import urllib.parse
 from bs4 import BeautifulSoup
 from datetime import datetime
 from supabase import create_client, Client
 
-# Supabase 접속 정보
 SUPABASE_URL = "https://izlyzbiriawqibxhgxnm.supabase.co"
 SUPABASE_KEY = "sb_secret_SuMvCM8l5XF3NYSieKcmdw_wkenExmw"
 SCRAPER_API_KEY = "31410731f1e2583c1a2bbbd532c282ea"
 
-# Supabase 클라이언트 초기화
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as init_err:
     print(f"Supabase 클라이언트 생성 실패: {init_err}")
     supabase = None
+
+def get_target_list():
+    # 1. list.json이 이미 있으면 바로 읽기
+    if os.path.exists('list.json'):
+        with open('list.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    # 2. list.json이 없고 list.xlsx가 있으면 자동 변환
+    if os.path.exists('list.xlsx'):
+        print("list.json이 없어 list.xlsx에서 선사 목록을 자동 추출합니다...")
+        import pandas as pd
+        df = pd.read_excel('list.xlsx')
+        sunsang24_df = df[df['platform'].str.contains('sunsang24', case=False, na=False)].copy()
+        
+        def extract_subdomain(url):
+            if not isinstance(url, str):
+                return None
+            url = url.strip()
+            parsed = urllib.parse.urlparse(url)
+            netloc = parsed.netloc if parsed.netloc else parsed.path.split('/')[0]
+            parts = netloc.split('.')
+            if len(parts) >= 3 and 'sunsang24' in netloc:
+                return parts[0].lower()
+            return None
+
+        sunsang24_df['subdomain'] = sunsang24_df['base_url'].apply(extract_subdomain)
+        sunsang24_df = sunsang24_df.dropna(subset=['subdomain'])
+
+        grouped = sunsang24_df.groupby('subdomain')['site_name'].apply(lambda x: list(set(x.dropna()))).reset_index()
+
+        targets = []
+        for idx, row in grouped.iterrows():
+            targets.append({
+                "subdomain": row['subdomain'],
+                "ships": row['site_name']
+            })
+
+        with open('list.json', 'w', encoding='utf-8') as f:
+            json.dump(targets, f, ensure_ascii=False)
+        return targets
+
+    raise FileNotFoundError("list.json 또는 list.xlsx 파일이 저장소에 없습니다.")
 
 def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: list):
     target_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
@@ -108,27 +149,17 @@ def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: list):
 
         return unique_results
     except Exception as e:
-        print(f"[{subdomain}] 수집 도중 에러: {e}")
+        print(f"[{subdomain}] 수집 에러: {e}")
         return []
 
 def run_batch():
-    if not os.path.exists('list.json'):
-        print("에러: list.json 파일이 경로에 존재하지 않습니다.")
-        return
-
-    try:
-        with open('list.json', 'r', encoding='utf-8') as f:
-            targets = json.load(f)
-    except Exception as file_err:
-        print(f"list.json 읽기 실패: {file_err}")
-        return
+    targets = get_target_list()
 
     now = datetime.now()
     yyyymm = now.strftime("%Y%m")
 
-    print(f"=== 총 {len(targets)}개 선사 배치 수집 개시 ===")
+    print(f"=== 총 {len(targets)}개 선사 배치 수집 시작 ===")
     
-    # 994개 선사 중 상위 선사부터 차례대로 수집
     for target in targets:
         subdomain = target.get('subdomain')
         ships = target.get('ships', [])
@@ -136,15 +167,15 @@ def run_batch():
         if not subdomain:
             continue
 
-        print(f"[{subdomain}] 스크래핑 시작...")
+        print(f"[{subdomain}] 스크래핑 진행 중...")
         results = scrape_sunsang24(subdomain, yyyymm, ships)
         
         if results and supabase:
             try:
                 supabase.table("ship_reservations").upsert(results, on_conflict="subdomain,ship_name,event_date").execute()
-                print(f" -> [{subdomain}] {len(results)}건 DB 저장 성공!")
+                print(f" -> [{subdomain}] {len(results)}건 DB 저장 완료")
             except Exception as db_err:
-                print(f" -> [{subdomain}] DB 저장 중 에러: {db_err}")
+                print(f" -> [{subdomain}] DB 저장 오류: {db_err}")
 
 if __name__ == "__main__":
     run_batch()
