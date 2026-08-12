@@ -12,13 +12,12 @@ SCRAPER_API_KEY = "31410731f1e2583c1a2bbbd532c282ea"
 def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
     target_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
     
-    # ScraperAPI 한국 프록시 IP + JS 실행 설정
     scraper_url = "https://api.scraperapi.com"
     params = {
         'api_key': SCRAPER_API_KEY,
         'url': target_url,
-        'render': 'true',         # 브라우저 JS 실행
-        'country_code': 'kr'      # 한국 IP 접속 (해외 IP 차단 완벽 우회)
+        'render': 'true',         # 크롬 JS 실행
+        'country_code': 'kr'      # 한국 프록시 IP
     }
 
     try:
@@ -32,58 +31,67 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
         html_text = res.text
         soup = BeautifulSoup(html_text, 'html.parser')
         
-        cleaned_results = []
+        # 전체 텍스트 수집 및 공백 정규화 (줄바꿈/탭 제거)
+        raw_text = soup.get_text(separator=' ', strip=True)
+        normalized_text = re.sub(r'\s+', ' ', raw_text)
+
         year_str = yyyymm[:4]
-        month_str = yyyymm[4:6]
+        cleaned_results = []
 
-        # 전체 텍스트 기반 렌더링 결과 추적
-        all_text = soup.get_text(separator='\n', strip=True)
+        # 1. 날짜 위치 탐색 ("9 월 1 일", "9월 1일" 등)
+        date_matches = list(re.finditer(r'(\d{1,2})\s*월\s*(\d{1,2})\s*일', normalized_text))
 
-        # 블록 단위 및 태그 단위 추출
-        elements = soup.find_all(['td', 'tr', 'div', 'li', 'p', 'article'])
+        for i in range(len(date_matches)):
+            d_match = date_matches[i]
+            month = int(d_match.group(1))
+            day = int(d_match.group(2))
+            event_date = f"{year_str}-{month:02d}-{day:02d}"
 
-        for el in elements:
-            text = el.get_text(separator=' ', strip=True)
-            if '어종' not in text and '남은자리' not in text and '예약' not in text and '출조' not in text:
-                continue
+            # 현재 날짜부터 다음 날짜 전까지의 텍스트 블록 자르기
+            start_idx = d_match.end()
+            end_idx = date_matches[i+1].start() if i + 1 < len(date_matches) else len(normalized_text)
+            section_text = normalized_text[start_idx:end_idx]
 
-            # 1. 배 이름 추출 (예: 레전드호, 뉴항구호)
-            ship_match = re.search(r'([가-힣A-Za-z0-9]+호)', text)
-            ship_name = ship_match.group(1) if ship_match else ""
+            # 2. 날짜 구간 내 선박(호) 위치 탐색 (예: 뉴항구호, 레전드호)
+            ship_matches = list(re.finditer(r'([가-힣A-Za-z0-9]+호)', section_text))
 
-            # 2. 어종 추출 ("어종 : 주꾸미,갑오징어" -> "주꾸미,갑오징어")
-            fish_match = re.search(r'어종\s*[:\s]*([^/\n\r<]+)', text) or re.search(r'《\s*([^》]+)\s*》', text)
-            title = fish_match.group(1).strip() if fish_match else ""
+            for j in range(len(ship_matches)):
+                s_match = ship_matches[j]
+                ship_name = s_match.group(1)
 
-            # 3. 날짜 추출 (M월 D일)
-            date_match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', text) or re.search(r'\b([1-9]|[12][0-9]|3[01])일\b', text)
-            event_date = ""
-            if date_match:
-                if len(date_match.groups()) == 2:
-                    event_date = f"{year_str}-{int(date_match.group(1)):02d}-{int(date_match.group(2)):02d}"
-                else:
-                    event_date = f"{year_str}-{month_str}-{int(date_match.group(1)):02d}"
+                s_start = s_match.end()
+                s_end = ship_matches[j+1].start() if j + 1 < len(ship_matches) else len(section_text)
+                ship_block = section_text[s_start:s_end]
 
-            # 4. 남은 자리 추출
-            rem_seat = 0
-            rem_match = re.search(r'남은자리\s*[:\s]*(\d+)', text) or re.search(r'(\d+)명\s*남음', text)
-            if rem_match:
-                rem_seat = int(rem_match.group(1))
+                # 어종 정밀 추출 ("어종 : 주꾸미,갑오징어 / 선상" -> "주꾸미,갑오징어")
+                fish_match = re.search(r'어종\s*[:\s]*([^/|\n\r<]+)', ship_block)
+                title = fish_match.group(1).strip() if fish_match else ""
 
-            is_closed = '예약마감' in text or '완료' in text
+                # 남은 자리 및 정원 추출
+                rem_seat = 0
+                rem_match = re.search(r'남은자리\s*[:\s]*(\d+)', ship_block) or re.search(r'(\d+)\s*명\s*남음', ship_block)
+                if rem_match:
+                    rem_seat = int(rem_match.group(1))
 
-            if event_date and (ship_name or title):
+                max_seat = 0
+                max_match = re.search(r'예약/\s*(\d+)\s*명', ship_block) or re.search(r'정원\s*[:\s]*(\d+)', ship_block)
+                if max_match:
+                    max_seat = int(max_match.group(1))
+
+                is_closed = '예약마감' in ship_block or '마감' in ship_block
+
                 cleaned_results.append({
                     "subdomain": subdomain,
-                    "ship_name": ship_name or "선박",
+                    "ship_name": ship_name,
                     "event_date": event_date,
                     "title": title or "출항 일정",
-                    "rem_seat": rem_seat,
+                    "max_seat": max_seat,
+                    "rem_seat": rem_seat if not is_closed else 0,
                     "ready": not is_closed and (rem_seat > 0 or bool(title)),
                     "booking_url": target_url
                 })
 
-        # 중복 정제
+        # 중복 항목 제거
         seen = set()
         unique_results = []
         for item in cleaned_results:
@@ -92,19 +100,13 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
                 seen.add(key)
                 unique_results.append(item)
 
-        response_payload = {
+        return {
             "status": "success",
             "subdomain": subdomain,
             "yyyymm": yyyymm,
             "count": len(unique_results),
             "data": unique_results
         }
-
-        # 수집 데이터가 없을 경우 진단용 텍스트 반환
-        if len(unique_results) == 0:
-            response_payload["debug_preview"] = all_text[:1000]
-
-        return response_payload
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
