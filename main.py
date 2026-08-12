@@ -1,36 +1,47 @@
 from fastapi import FastAPI, HTTPException
 from supabase import create_client, Client
 import uvicorn
+from typing import Optional
 
 app = FastAPI()
 
-# 전달해주신 Supabase 프로젝트 URL 및 Secret Key 적용
 SUPABASE_URL = "https://izlyzbiriawqibxhgxnm.supabase.co"
 SUPABASE_KEY = "sb_secret_SuMvCM8l5XF3NYSieKcmdw_wkenExmw"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# 기본 메인 주소 접속 시 상태 안내
+@app.get("/")
+def read_root():
+    return {"status": "online", "message": "Boat API Server is running!"}
+
+# 전체 선사 또는 특정 선사 조회 API
 @app.get("/api/v1/reservations")
+@app.get("/api/v1/reservations/")
 def get_reservations_from_db(
-    subdomain: str = "daebak", 
-    start_date: str = None, 
-    end_date: str = None
+    subdomain: Optional[str] = None, 
+    start_date: Optional[str] = None, 
+    end_date: Optional[str] = None
 ):
     try:
-        query = supabase.table("ship_reservations").select("*").eq("subdomain", subdomain)
+        query = supabase.table("ship_reservations").select("*")
         
+        # 특정 subdomain 지정 시 필터링 (미지정 시 전체 선사 조회)
+        if subdomain:
+            query = query.eq("subdomain", subdomain)
+            
         if start_date:
             query = query.gte("event_date", start_date)
         if end_date:
             query = query.lte("event_date", end_date)
 
-        response = query.order("event_date", desc=False).execute()
+        response = query.order("event_date", desc=False).limit(10000).execute()
         data = response.data
 
         return {
             "status": "success",
-            "subdomain": subdomain,
-            "count": len(data),
+            "filter_subdomain": subdomain if subdomain else "ALL_SHIPS",
+            "total_count": len(data),
             "data": data
         }
 
