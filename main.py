@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 import requests
 import uvicorn
 import calendar
+import re
 
 app = FastAPI()
 
@@ -11,18 +12,30 @@ HEADERS = {
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
-# 제외할 공지/조황 관련 키워드 리스트
-EXCLUDE_KEYWORDS = ["이벤트", "공지", "알림", "조황", "전체보기", "안내", "환불", "팝업", "규정"]
+EXCLUDE_KEYWORDS = ["이벤트알림", "공지사항", "조황정보", "전체보기", "환불안내", "팝업"]
+
+def clean_date(date_str: str) -> str:
+    if not date_str:
+        return ""
+    match = re.search(r'(\d{4})[.-](\d{1,2})[.-](\d{1,2})', str(date_str))
+    if match:
+        return f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+    return str(date_str).strip()
 
 @app.get("/api/v1/reservations")
 def get_live_reservations(
     subdomain: str = "daebak", 
     ship_id: str = "375",
-    yyyymm: str = "202609",
+    yyyymm: str = None,
     start_date: str = None,
     end_date: str = None
 ):
-    # 날짜 범위 자동 계산 (기본값: 지정 연월의 1일~말일)
+    # start_date 기반 yyyymm 자동 추출
+    if start_date and not yyyymm:
+        yyyymm = start_date.replace("-", "")[:6]
+    elif not yyyymm:
+        yyyymm = "202609"
+
     if not start_date or not end_date:
         try:
             year = int(yyyymm[:4])
@@ -34,10 +47,9 @@ def get_live_reservations(
             start_date = "2026-09-01"
             end_date = "2026-09-30"
 
-    # 1. 어종/선비/정원 상세 데이터 API
+    # 1. 상세 일정/어종 API
     info_url = f"https://service.sunsang24.com/v1/customer/event_list/{ship_id}?rows=100&yyyymm={yyyymm}"
-    
-    # 2. 실시간 예약 달력 API
+    # 2. 예약 달력 API
     res_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet_reservation/{start_date}/{end_date}"
 
     req_headers = HEADERS.copy()
@@ -45,32 +57,48 @@ def get_live_reservations(
     req_headers['Origin'] = f"https://{subdomain}.sunsang24.com"
 
     try:
-        # A. 어종 및 일정 세부 정보 추출
-        info_dict = {}
+        # A. 어종 및 일정 세부 정보 추출 (이중 매핑 구조)
+        info_by_no = {}
+        info_by_date = {}
+
         res_info = requests.get(info_url, headers=HEADERS, timeout=6)
         if res_info.status_code == 200:
-            raw_info = res_info.json()
-            if isinstance(raw_info, list):
-                for item in raw_info:
-                    # 공지사항 / 팝업 플래그 제외
-                    if item.get("is_notice") is True or item.get("is_popup") is True:
-                        continue
+            raw_data = res_info.json()
+            
+            # JSON 응답 객체/배열 자동 분해
+            if isinstance(raw_data, dict):
+                raw_list = raw_data.get("data") or raw_data.get("list") or []
+            elif isinstance(raw_data, list):
+                raw_list = raw_data
+            else:
+                raw_list = []
 
-                    title = item.get("title") or item.get("fish_type") or item.get("subject") or ""
-                    
-                    # 제목에 공지/조황 키워드가 포함되면 무조건 제외
-                    if any(kw in title for kw in EXCLUDE_KEYWORDS):
-                        continue
+            for item in raw_list:
+                if not isinstance(item, dict):
+                    continue
 
-                    sdate = item.get("event_sdate") or item.get("date") or ""
-                    if sdate:
-                        info_dict[sdate] = {
-                            "title": title,
-                            "max_seat": int(item.get("max_cnt") or item.get("total_seat") or 0),
-                            "rem_seat": int(item.get("rem_cnt") or item.get("left_seat") or 0),
-                            "price": int(item.get("price") or item.get("fee") or 0),
-                            "ship_name": item.get("ship_name") or "대박호"
-                        }
+                if item.get("is_notice") is True or item.get("is_popup") is True:
+                    continue
+
+                title = item.get("title") or item.get("fish_type") or item.get("subject") or ""
+                if any(kw in title for kw in EXCLUDE_KEYWORDS):
+                    continue
+
+                sdate = clean_date(item.get("event_sdate") or item.get("date") or "")
+                sched_no = str(item.get("no") or item.get("ship_schedule_no") or "")
+
+                item_detail = {
+                    "title": title,
+                    "max_seat": int(item.get("max_cnt") or item.get("total_seat") or item.get("person_limit") or 0),
+                    "rem_seat": int(item.get("rem_cnt") or item.get("left_seat") or item.get("person_rem") or 0),
+                    "price": int(item.get("price") or item.get("fee") or item.get("person_price") or 0),
+                    "ship_name": item.get("ship_name") or "대박호"
+                }
+
+                if sched_no:
+                    info_by_no[sched_no] = item_detail
+                if sdate:
+                    info_by_date[sdate] = item_detail
 
         # B. 예약 달력 데이터 수집 및 결합
         cleaned_results = []
@@ -78,31 +106,31 @@ def get_live_reservations(
         
         if res_fleet.status_code == 200:
             fleet_json = res_fleet.json()
-            raw_list = fleet_json.get("data", [])
+            raw_list = fleet_json.get("data", []) if isinstance(fleet_json, dict) else fleet_json
             
             for item in raw_list:
-                sdate = item.get("sdate", "")
-                if not sdate:
+                if not isinstance(item, dict):
                     continue
 
-                schedule_no = item.get("ship_schedule_no") or item.get("no")
-                detail = info_dict.get(sdate, {})
-                title = detail.get("title", "")
+                sdate = clean_date(item.get("sdate", ""))
+                sched_no = str(item.get("ship_schedule_no") or item.get("no") or "")
 
-                # 공지 키워드가 필터링된 유효 어종 데이터만 수집
+                # 고유번호 우선 매칭 ➔ 날짜 기준 2차 매칭
+                detail = info_by_no.get(sched_no) or info_by_date.get(sdate) or {}
+
                 ready = bool(
                     item.get("reservation_fishing_ready") or 
                     detail.get("rem_seat", 0) > 0 or 
-                    bool(title)
+                    bool(detail.get("title"))
                 )
 
                 cleaned_results.append({
-                    "schedule_no": schedule_no,
+                    "schedule_no": int(sched_no) if sched_no.isdigit() else sched_no,
                     "subdomain": subdomain,
                     "ship_id": ship_id,
                     "ship_name": detail.get("ship_name", "대박호"),
                     "event_date": sdate,
-                    "title": title,
+                    "title": detail.get("title", ""),
                     "max_seat": detail.get("max_seat", 0),
                     "rem_seat": detail.get("rem_seat", 0),
                     "price": detail.get("price", 0),
