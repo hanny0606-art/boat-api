@@ -1,21 +1,23 @@
 from fastapi import FastAPI, HTTPException
 import requests
-from bs4 import BeautifulSoup
-import re
 import uvicorn
 import calendar
+import re
 
 app = FastAPI()
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
 }
+
+EXCLUDE_KEYWORDS = ["이벤트알림", "공지사항", "조황정보", "전체보기", "환불안내", "팝업", "규정"]
 
 @app.get("/api/v1/reservations")
 def get_live_reservations(
     subdomain: str = "daebak", 
+    ship_id: str = None,
     yyyymm: str = "202609",
     start_date: str = None,
     end_date: str = None
@@ -28,121 +30,107 @@ def get_live_reservations(
             start_date = f"{year}-{month:02d}-01"
             end_date = f"{year}-{month:02d}-{last_day:02d}"
         except Exception:
-            start_date = f"{yyyymm[:4]}-{yyyymm[4:6]}-01"
-            end_date = f"{yyyymm[:4]}-{yyyymm[4:6]}-30"
+            start_date = "2026-09-01"
+            end_date = "2026-09-30"
 
-    # 1. 선단 fleet 달력 HTML URL
+    # 1. 선단 메인 페이지에서 등록된 모든 ship_id 정밀 자동 스캔
     fleet_html_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
-    # 2. 예약 현황 API URL
-    fleet_res_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet_reservation/{start_date}/{end_date}"
+    discovered_ship_ids = set()
+    
+    if ship_id:
+        discovered_ship_ids.add(str(ship_id))
 
+    try:
+        html_res = requests.get(fleet_html_url, headers=HEADERS, timeout=5)
+        if html_res.status_code == 200:
+            html_text = html_res.text
+            # URL 및 스크립트 내부 ship_id 추출
+            found_ids = re.findall(r'/(?:schedule|event_list|ship)/(\d{3,6})', html_text)
+            for fid in found_ids:
+                discovered_ship_ids.add(fid)
+                
+            found_ids_js = re.findall(r'ship[_\-]?id["\']?\s*[:=]\s*["\']?(\d{3,6})', html_text, re.I)
+            for fid in found_ids_js:
+                discovered_ship_ids.add(fid)
+    except Exception:
+        pass
+
+    # 기본 백업 ship_id (대박호 계열)
+    if not discovered_ship_ids:
+        discovered_ship_ids = {"375", "376", "377"}
+
+    # 2. 스캔된 선박별 상세 일정 정보 수집 (schedule_no 기준 1:1 매핑 테이블 생성)
+    master_schedule_dict = {}
+
+    for sid in discovered_ship_ids:
+        info_url = f"https://service.sunsang24.com/v1/customer/event_list/{sid}?rows=100&yyyymm={yyyymm}"
+        try:
+            res = requests.get(info_url, headers=HEADERS, timeout=5)
+            if res.status_code == 200:
+                raw_data = res.json()
+                raw_list = raw_data.get("data") if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
+                
+                for item in raw_list:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("is_notice") or item.get("is_popup"):
+                        continue
+                    
+                    title = item.get("title") or item.get("fish_type") or item.get("subject") or ""
+                    if any(kw in title for kw in EXCLUDE_KEYWORDS):
+                        continue
+
+                    sched_no = str(item.get("no") or item.get("ship_schedule_no") or "")
+                    if sched_no:
+                        master_schedule_dict[sched_no] = {
+                            "ship_id": sid,
+                            "ship_name": item.get("ship_name") or "선박",
+                            "title": title,
+                            "max_seat": int(item.get("max_cnt") or item.get("total_seat") or item.get("person_limit") or 0),
+                            "rem_seat": int(item.get("rem_cnt") or item.get("left_seat") or item.get("person_rem") or 0),
+                            "price": int(item.get("price") or item.get("fee") or item.get("person_price") or 0),
+                        }
+        except Exception:
+            continue
+
+    # 3. 실시간 예약 API 데이터 수집 및 고유 일정 번호(schedule_no) 1:1 결합
+    fleet_res_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet_reservation/{start_date}/{end_date}"
     req_headers = HEADERS.copy()
     req_headers['Referer'] = f"https://{subdomain}.sunsang24.com/"
 
-    # --- [Step 1] Fleet HTML 파싱: 배이름, 어종(title), 정원, 마감상태 정밀 추출 ---
-    html_schedules = []
-    try:
-        html_res = requests.get(fleet_html_url, headers=req_headers, timeout=8)
-        if html_res.status_code == 200:
-            soup = BeautifulSoup(html_res.text, 'html.parser')
-            
-            # 일별/선박별 일정 블록 수집
-            blocks = soup.find_all(['td', 'tr', 'div', 'li'])
-            
-            for block in blocks:
-                text = block.get_text(separator=' ', strip=True)
-                if '어종' not in text and '운항시간' not in text and '예약' not in text:
-                    continue
-
-                # 배 이름 추출 (예: 레전드호, 뉴항구호)
-                ship_match = re.search(r'([가-힣A-Za-z0-9]+호)', text)
-                ship_name = ship_match.group(1) if ship_match else ""
-
-                # 어종 정보만 정밀 추출 ("어종 : 주꾸미,갑오징어 / 선상" -> "주꾸미,갑오징어")
-                fish_match = re.search(r'어종\s*[:\s]*([^/\n\r<]+)', text)
-                title = fish_match.group(1).strip() if fish_match else ""
-
-                # 날짜 추출 (예: 9월 6일 -> 2026-09-06)
-                m_md = re.search(r'(\d{1,2})월\s*(\d{1,2})일', text)
-                m_d = re.search(r'\b([1-9]|[12][0-9]|3[01])일\b', text)
-                
-                event_date = ""
-                year_str = yyyymm[:4]
-                month_str = yyyymm[4:6]
-
-                if m_md:
-                    event_date = f"{year_str}-{int(m_md.group(1)):02d}-{int(m_md.group(2)):02d}"
-                elif m_d:
-                    event_date = f"{year_str}-{month_str}-{int(m_d.group(1)):02d}"
-
-                # 정원 / 잔여석 추출
-                max_seat = 0
-                rem_seat = 0
-                seat_match = re.search(r'(\d+)명', text)
-                if seat_match:
-                    max_seat = int(seat_match.group(1))
-
-                is_closed = '예약마감' in text
-                if not is_closed:
-                    rem_match = re.search(r'남은자리\s*[:\s]*(\d+)', text)
-                    if rem_match:
-                        rem_seat = int(rem_match.group(1))
-
-                if event_date and (ship_name or title):
-                    html_schedules.append({
-                        "event_date": event_date,
-                        "ship_name": ship_name,
-                        "title": title,
-                        "max_seat": max_seat,
-                        "rem_seat": rem_seat,
-                        "is_closed": is_closed
-                    })
-    except Exception as e:
-        print(f"HTML 파싱 에러: {e}")
-
-    # --- [Step 2] 실시간 예약 API 응답과 HTML 데이터 매칭 ---
     cleaned_results = []
     try:
-        res = requests.get(fleet_res_url, headers=req_headers, timeout=8)
+        res = requests.get(fleet_res_url, headers=req_headers, timeout=6)
         if res.status_code == 200:
             json_data = res.json()
             raw_list = json_data.get("data", []) if isinstance(json_data, dict) else json_data
             
-            for idx, item in enumerate(raw_list):
+            for item in raw_list:
                 if not isinstance(item, dict):
                     continue
 
                 sdate = item.get("sdate", "")
-                sched_no = item.get("ship_schedule_no") or item.get("no")
-
-                # 동일 날짜의 HTML 파싱 데이터 매칭
-                matched_list = [h for h in html_schedules if h["event_date"] == sdate]
+                sched_no = str(item.get("ship_schedule_no") or item.get("no") or "")
                 
-                # 순서나 배 이름 매칭
-                matched_info = None
-                if matched_list:
-                    if idx < len(matched_list):
-                        matched_info = matched_list[idx]
-                    else:
-                        matched_info = matched_list[0]
+                # 1:1 ID 매칭
+                detail = master_schedule_dict.get(sched_no, {})
 
-                ship_name = matched_info["ship_name"] if matched_info and matched_info["ship_name"] else "선박"
-                title = matched_info["title"] if matched_info else ""
-                max_seat = matched_info["max_seat"] if matched_info else 0
-                rem_seat = matched_info["rem_seat"] if matched_info else 0
-                is_closed = matched_info["is_closed"] if matched_info else False
-
+                rem_seat = detail.get("rem_seat", 0)
+                title = detail.get("title", "")
                 fishing_ready = bool(item.get("reservation_fishing_ready"))
-                ready = fishing_ready and not is_closed
+                
+                ready = fishing_ready or rem_seat > 0 or bool(title)
 
                 cleaned_results.append({
-                    "schedule_no": sched_no,
+                    "schedule_no": int(sched_no) if sched_no.isdigit() else sched_no,
                     "subdomain": subdomain,
-                    "ship_name": ship_name,
+                    "ship_id": detail.get("ship_id", ship_id or ""),
+                    "ship_name": detail.get("ship_name", "선박"),
                     "event_date": sdate,
                     "title": title,
-                    "max_seat": max_seat,
+                    "max_seat": detail.get("max_seat", 0),
                     "rem_seat": rem_seat,
+                    "price": detail.get("price", 0),
                     "ready": ready,
                     "booking_url": f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
                 })
