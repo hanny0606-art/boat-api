@@ -6,28 +6,28 @@ import uvicorn
 
 app = FastAPI()
 
-# Step 1에서 발급받은 본인의 ScraperAPI 키를 여기에 입력하세요
+# 전달해주신 ScraperAPI Key 적용
 SCRAPER_API_KEY = "31410731f1e2583c1a2bbbd532c282ea"
 
 @app.get("/api/v1/reservations")
 def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
     target_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
     
-    # ScraperAPI 엔드포인트 설정 (render=true 옵션으로 자바스크립트 완전 실행)
-    scraper_url = "http://api.scraperapi.com"
+    # ScraperAPI 속도 최적화 및 타임아웃 방지 설정
+    scraper_url = "https://api.scraperapi.com"
     params = {
         'api_key': SCRAPER_API_KEY,
         'url': target_url,
-        'render': 'true'  # 클라우드 크롬 브라우저에서 JS를 실행하도록 지시
+        'render': 'true',          # JS 실행 완료 후 HTML 수집
+        'block_resources': 'true'  # 이미지/CSS/폰트 차단으로 렌더링 속도 최적화
     }
 
     try:
-        # ScraperAPI가 JS 렌더링을 끝내고 완성형 HTML을 반환할 때까지 대기
-        res = requests.get(scraper_url, params=params, timeout=35)
+        res = requests.get(scraper_url, params=params, timeout=60)
         if res.status_code != 200:
             return {
                 "status": "error", 
-                "message": f"ScraperAPI 요청 실패 (상태코드: {res.status_code}). API Key를 확인하세요."
+                "message": f"ScraperAPI 응답 실패 (상태코드: {res.status_code})."
             }
 
         html_text = res.text
@@ -37,7 +37,7 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
         year_str = yyyymm[:4]
         month_str = yyyymm[4:6]
 
-        # JS 실행 후 그려진 일정 영역 요소 검색
+        # JS 렌더링 완료 후 생성된 일정 요소 탐색
         elements = soup.find_all(['td', 'tr', 'div', 'li'])
 
         for el in elements:
@@ -49,7 +49,7 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
             ship_match = re.search(r'([가-힣A-Za-z0-9]+호)', text)
             ship_name = ship_match.group(1) if ship_match else ""
 
-            # 2. 어종 정밀 추출 ("어종 : 주꾸미,갑오징어" -> "주꾸미,갑오징어")
+            # 2. 어종 추출 ("어종 : 주꾸미,갑오징어" -> "주꾸미,갑오징어")
             fish_match = re.search(r'어종\s*[:\s]*([^/\n\r<]+)', text)
             title = fish_match.group(1).strip() if fish_match else ""
 
@@ -62,7 +62,7 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
                 else:
                     event_date = f"{year_str}-{month_str}-{int(date_match.group(1)):02d}"
 
-            # 4. 남은 자리 수 추출
+            # 4. 남은 자리 추출
             rem_seat = 0
             rem_match = re.search(r'남은자리\s*[:\s]*(\d+)', text) or re.search(r'(\d+)명\s*남음', text)
             if rem_match:
@@ -81,7 +81,7 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
                     "booking_url": target_url
                 })
 
-        # 날짜 / 선박 / 어종 기준 중복 정제
+        # 중복 정제
         seen = set()
         unique_results = []
         for item in cleaned_results:
