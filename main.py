@@ -6,7 +6,7 @@ from typing import Optional
 app = FastAPI()
 
 SUPABASE_URL = "https://izlyzbiriawqibxhgxnm.supabase.co"
-SUPABASE_KEY = "sb_secret_SuMvCM8l5XF3NYSieKcmdw_wkenExmw"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml6bHl6YmlyaWF3cWlieGhneG5tIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjUxMDA5NiwiZXhwIjoyMTAyMDg2MDk2fQ.U53kQRvnndqDTjoOwAP8AeJZr30W-zveozHMhMsJrjA"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
