@@ -6,11 +6,17 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from supabase import create_client, Client
 
+# Supabase 접속 정보
 SUPABASE_URL = "https://izlyzbiriawqibxhgxnm.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml6bHl6YmlyaWF3cWlieGhneG5tIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjUxMDA5NiwiZXhwIjoyMTAyMDg2MDk2fQ.U53kQRvnndqDTjoOwAP8AeJZr30W-zveozHMhMsJrjA"
+SUPABASE_KEY = "sb_secret_SuMvCM8l5XF3NYSieKcmdw_wkenExmw"
 SCRAPER_API_KEY = "31410731f1e2583c1a2bbbd532c282ea"
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Supabase 클라이언트 초기화
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as init_err:
+    print(f"Supabase 클라이언트 생성 실패: {init_err}")
+    supabase = None
 
 def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: list):
     target_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
@@ -25,6 +31,7 @@ def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: list):
     try:
         res = requests.get(scraper_url, params=params, timeout=60)
         if res.status_code != 200:
+            print(f"[{subdomain}] ScraperAPI 실패 (상태코드: {res.status_code})")
             return []
 
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -101,21 +108,27 @@ def scrape_sunsang24(subdomain: str, yyyymm: str, valid_ships: list):
 
         return unique_results
     except Exception as e:
-        print(f"[{subdomain}] 에러 발생: {e}")
+        print(f"[{subdomain}] 수집 도중 에러: {e}")
         return []
 
 def run_batch():
     if not os.path.exists('list.json'):
-        print("list.json 파일이 존재하지 않습니다.")
+        print("에러: list.json 파일이 경로에 존재하지 않습니다.")
         return
 
-    with open('list.json', 'r', encoding='utf-8') as f:
-        targets = json.load(f)
+    try:
+        with open('list.json', 'r', encoding='utf-8') as f:
+            targets = json.load(f)
+    except Exception as file_err:
+        print(f"list.json 읽기 실패: {file_err}")
+        return
 
     now = datetime.now()
     yyyymm = now.strftime("%Y%m")
 
-    print(f"=== 총 {len(targets)}개 선사 데이터 수집 시작 ===")
+    print(f"=== 총 {len(targets)}개 선사 배치 수집 개시 ===")
+    
+    # 994개 선사 중 상위 선사부터 차례대로 수집
     for target in targets:
         subdomain = target.get('subdomain')
         ships = target.get('ships', [])
@@ -123,15 +136,15 @@ def run_batch():
         if not subdomain:
             continue
 
-        print(f"[{subdomain}] 수집 진행 중...")
+        print(f"[{subdomain}] 스크래핑 시작...")
         results = scrape_sunsang24(subdomain, yyyymm, ships)
         
-        if results:
+        if results and supabase:
             try:
                 supabase.table("ship_reservations").upsert(results, on_conflict="subdomain,ship_name,event_date").execute()
-                print(f" -> [{subdomain}] {len(results)}건 DB 저장 완료")
+                print(f" -> [{subdomain}] {len(results)}건 DB 저장 성공!")
             except Exception as db_err:
-                print(f" -> [{subdomain}] DB 저장 에러: {db_err}")
+                print(f" -> [{subdomain}] DB 저장 중 에러: {db_err}")
 
 if __name__ == "__main__":
     run_batch()
