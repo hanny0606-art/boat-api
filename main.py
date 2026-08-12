@@ -11,29 +11,6 @@ HEADERS = {
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
-def safe_extract(item: dict, keys: list, default=None):
-    """최상위 딕셔너리뿐만 아니라 하위 중첩 객체/리스트까지 탐색하여 값을 추출합니다."""
-    # 1. 최상위 단일 필드 검색
-    for k in keys:
-        if k in item and item[k] not in (None, ""):
-            return item[k]
-            
-    # 2. 하위 중첩 객체(events, ship, schedule 등) 내부 검색
-    nested_keys = ['events', 'event', 'ship', 'ships', 'schedule', 'schedules', 'detail', 'info']
-    for nk in nested_keys:
-        sub_obj = item.get(nk)
-        if isinstance(sub_obj, dict):
-            for k in keys:
-                if k in sub_obj and sub_obj[k] not in (None, ""):
-                    return sub_obj[k]
-        elif isinstance(sub_obj, list) and len(sub_obj) > 0:
-            for elem in sub_obj:
-                if isinstance(elem, dict):
-                    for k in keys:
-                        if k in elem and elem[k] not in (None, ""):
-                            return elem[k]
-    return default
-
 @app.get("/api/v1/reservations")
 def get_live_reservations(
     subdomain: str = "seojin", 
@@ -68,43 +45,85 @@ def get_live_reservations(
         json_data = response.json()
         raw_list = json_data.get("data", [])
         
-        # 디버그 모드: 원본 구조 확인용
+        # 디버그 모드: 원본 JSON 구조 확인용
         if debug:
             return {"status": "debug", "raw_data": raw_list}
         
         cleaned_results = []
-        for item in raw_list:
-            if not isinstance(item, dict):
+        
+        for top_item in raw_list:
+            if not isinstance(top_item, dict):
                 continue
+            
+            # 날짜 항목 내 하위 리스트(ship_schedules, schedules, events 등) 탐색
+            inner_list = None
+            for key in ['ship_schedules', 'schedules', 'events', 'list', 'ships', 'items']:
+                if key in top_item and isinstance(top_item[key], list) and len(top_item[key]) > 0:
+                    inner_list = top_item[key]
+                    break
+            
+            # 하위 리스트가 있으면 하위 항목들을 개별 레코드로 분리
+            items_to_process = []
+            if inner_list:
+                for sub in inner_list:
+                    if isinstance(sub, dict):
+                        merged = top_item.copy()
+                        merged.update(sub)
+                        items_to_process.append(merged)
+            else:
+                items_to_process.append(top_item)
 
-            # 날짜 추출
-            event_date = safe_extract(item, ["sdate", "event_sdate", "date"], "")
-            
-            # 배 이름 및 제목(어종/일정) 추출
-            ship_name = safe_extract(item, ["ship_name", "name"], "")
-            title = safe_extract(item, ["title", "fish_type", "subject", "notice_title"], "")
-            
-            # 인원 및 가격 수치 추출
-            max_seat = int(safe_extract(item, ["max_cnt", "total_seat", "person_limit", "max_person"], 0) or 0)
-            rem_seat = int(safe_extract(item, ["rem_cnt", "left_seat", "person_rem", "rem_person"], 0) or 0)
-            price = int(safe_extract(item, ["price", "fee", "person_price"], 0) or 0)
-            
-            # 예약 가능 여부
-            ready_val = safe_extract(item, ["reservation_fishing_ready", "is_ready", "ready"], False)
-            # 일정 제목이 있거나 남은 자리가 0보다 크면 오픈된 일정으로 판단
-            ready = bool(ready_val or title or rem_seat > 0)
+            # 필드 추출 및 정제
+            for item in items_to_process:
+                event_date = item.get("sdate") or item.get("event_sdate") or item.get("date") or ""
+                
+                ship_info = item.get("ship") if isinstance(item.get("ship"), dict) else {}
+                ship_name = item.get("ship_name") or ship_info.get("name") or item.get("name") or ""
+                
+                title = (
+                    item.get("title") or 
+                    item.get("subject") or 
+                    item.get("fish_type") or 
+                    item.get("fish_name") or 
+                    item.get("notice_title") or ""
+                )
+                
+                max_seat = int(
+                    item.get("person_limit") or 
+                    item.get("max_cnt") or 
+                    item.get("total_seat") or 
+                    item.get("max_person") or 0
+                )
+                rem_seat = int(
+                    item.get("person_rem") or 
+                    item.get("rem_cnt") or 
+                    item.get("left_seat") or 
+                    item.get("rem_person") or 0
+                )
+                price = int(
+                    item.get("person_price") or 
+                    item.get("price") or 
+                    item.get("fee") or 0
+                )
+                
+                ready = bool(
+                    item.get("reservation_fishing_ready") or 
+                    item.get("is_ready") or 
+                    (rem_seat > 0) or 
+                    bool(title)
+                )
 
-            cleaned_results.append({
-                "schedule_no": item.get("ship_schedule_no") or item.get("no"),
-                "ship_name": ship_name,
-                "event_date": event_date,
-                "title": title,
-                "max_seat": max_seat,
-                "rem_seat": rem_seat,
-                "price": price,
-                "ready": ready,
-                "booking_url": f"https://{subdomain}.sunsang24.com/"
-            })
+                cleaned_results.append({
+                    "schedule_no": item.get("ship_schedule_no") or item.get("no") or item.get("id"),
+                    "ship_name": ship_name,
+                    "event_date": event_date,
+                    "title": title,
+                    "max_seat": max_seat,
+                    "rem_seat": rem_seat,
+                    "price": price,
+                    "ready": ready,
+                    "booking_url": f"https://{subdomain}.sunsang24.com/"
+                })
             
         return {
             "status": "success",
