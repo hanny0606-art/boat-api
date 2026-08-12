@@ -3,5 +3,3 @@ uvicorn
 requests
 beautifulsoup4
 supabase
-pandas
-openpyxl
