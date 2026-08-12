@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 import requests
-from bs4 import BeautifulSoup
+import json
 import re
 import uvicorn
 
@@ -12,82 +12,95 @@ HEADERS = {
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
+EXCLUDE_KEYWORDS = ["이벤트알림", "공지사항", "조황정보", "전체보기", "환불안내", "팝업"]
+
 @app.get("/api/v1/reservations")
 def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
-    # 선단 전체 달력 HTML 주소 단 1개만 요청
     target_url = f"https://{subdomain}.sunsang24.com/ship/schedule_fleet/{yyyymm}"
     
     try:
-        res = requests.get(target_url, headers=HEADERS, timeout=10)
+        res = requests.get(target_url, headers=HEADERS, timeout=8)
         if res.status_code != 200:
             raise HTTPException(status_code=res.status_code, detail="선사 페이지 로딩 실패")
             
         html_text = res.text
-        soup = BeautifulSoup(html_text, 'html.parser')
         
+        # 1. <script> 태그 내부의 JSON 배열/객체 패턴 스캔
+        json_matches = re.findall(r'(\[\s*\{.*?\}\s*\]|\{\s*["\'](?:schedules|events|data)["\']\s*:.*?\})', html_text, re.DOTALL)
+        
+        extracted_items = []
+        
+        for raw_json in json_matches:
+            try:
+                # 싱글 쿼테이션 처리 및 JSON 변환
+                valid_json_str = re.sub(r"'", '"', raw_json)
+                parsed = json.loads(valid_json_str)
+                
+                if isinstance(parsed, dict):
+                    parsed = parsed.get("data") or parsed.get("schedules") or parsed.get("events") or []
+                
+                if isinstance(parsed, list):
+                    for obj in parsed:
+                        if isinstance(obj, dict) and ("sdate" in obj or "event_sdate" in obj or "ship_name" in obj):
+                            extracted_items.append(obj)
+            except Exception:
+                continue
+
+        # 2. JSON 파싱 실패 시 HTML 내 텍스트 구문 정밀 추적 (백업)
         cleaned_results = []
         year_str = yyyymm[:4]
         month_str = yyyymm[4:6]
 
-        # 달력 내 날짜/선박별 일정 컨테이너 추출
-        # 선상24는 일정 요소를 <tr>, <td>, <div class="schedule..."> 등에 배치함
-        containers = soup.find_all(['td', 'tr', 'div'], class_=re.compile(r'schedule|event|day|fleet|item', re.I))
-        if not containers:
-            containers = soup.find_all(['td', 'div'])
+        if extracted_items:
+            for item in extracted_items:
+                title = item.get("title") or item.get("fish_type") or item.get("subject") or ""
+                if any(kw in title for kw in EXCLUDE_KEYWORDS):
+                    continue
 
-        for container in containers:
-            text = container.get_text(separator=' ', strip=True)
-            if not text or ('어종' not in text and '남은자리' not in text and '예약' not in text):
-                continue
+                sdate = item.get("sdate") or item.get("event_sdate") or ""
+                rem_seat = int(item.get("rem_cnt") or item.get("left_seat") or item.get("person_rem") or 0)
+                max_seat = int(item.get("max_cnt") or item.get("person_limit") or item.get("total_seat") or 0)
+                price = int(item.get("price") or item.get("fee") or 0)
 
-            # 1. 일정 고유 번호(schedule_no) 추출 (data-no, href, onclick 등에서 추출)
-            schedule_no = ""
-            no_match = re.search(r'(?:schedule_no|no|event_no|id)[=/\'\"]+(\d{6,8})', str(container))
-            if no_match:
-                schedule_no = no_match.group(1)
-
-            # 2. 날짜 추출 (M월 D일)
-            date_match = re.search(r'(\d{1,2})월\s*(\d{1,2})일', text) or re.search(r'\b([1-9]|[12][0-9]|3[01])일\b', text)
-            event_date = ""
-            if date_match:
-                if len(date_match.groups()) == 2:
-                    event_date = f"{year_str}-{int(date_match.group(1)):02d}-{int(date_match.group(2)):02d}"
-                else:
-                    event_date = f"{year_str}-{month_str}-{int(date_match.group(1)):02d}"
-
-            # 3. 배 이름 추출 (레전드호, 뉴항구호 등)
-            ship_name = "선박"
-            ship_match = re.search(r'([가-힣A-Za-z0-9]+호)', text)
-            if ship_match:
-                ship_name = ship_match.group(1)
-
-            # 4. 어종 추출 ("어종 : 주꾸미,갑오징어" -> "주꾸미,갑오징어")
-            title = ""
-            fish_match = re.search(r'어종\s*[:\s]*([^/\n\r<]+)', text)
-            if fish_match:
-                title = fish_match.group(1).strip()
-
-            # 5. 남은자리 추출
-            rem_seat = 0
-            rem_match = re.search(r'남은자리\s*[:\s]*(\d+)', text) or re.search(r'(\d+)명\s*남음', text)
-            if rem_match:
-                rem_seat = int(rem_match.group(1))
-
-            is_closed = '예약마감' in text or '완료' in text
-
-            if event_date and (ship_name != "선박" or title):
                 cleaned_results.append({
-                    "schedule_no": int(schedule_no) if schedule_no.isdigit() else schedule_no,
+                    "schedule_no": item.get("ship_schedule_no") or item.get("no") or item.get("id"),
+                    "subdomain": subdomain,
+                    "ship_name": item.get("ship_name") or item.get("ship", {}).get("name") or "선박",
+                    "event_date": sdate,
+                    "title": title,
+                    "max_seat": max_seat,
+                    "rem_seat": rem_seat,
+                    "price": price,
+                    "ready": rem_seat > 0 or bool(title),
+                    "booking_url": target_url
+                })
+        else:
+            # 원본 HTML에서 스케줄 패턴 추출
+            pattern = re.compile(
+                r'([가-힣A-Za-z0-9]+호).*?(\d{1,2}월\s*\d{1,2}일).*?어종\s*[:\s]*([^/\n\r<]+)', 
+                re.DOTALL
+            )
+            for match in pattern.finditer(html_text):
+                ship_name = match.group(1)
+                date_raw = match.group(2)
+                title = match.group(3).strip()
+
+                m_md = re.search(r'(\d{1,2})월\s*(\d{1,2})일', date_raw)
+                event_date = f"{year_str}-{int(m_md.group(1)):02d}-{int(m_md.group(2)):02d}" if m_md else f"{year_str}-{month_str}-01"
+
+                cleaned_results.append({
+                    "schedule_no": "",
                     "subdomain": subdomain,
                     "ship_name": ship_name,
                     "event_date": event_date,
-                    "title": title or "출항 일정",
-                    "rem_seat": rem_seat,
-                    "ready": not is_closed and (rem_seat > 0 or bool(title)),
+                    "title": title,
+                    "max_seat": 0,
+                    "rem_seat": 0,
+                    "ready": True,
                     "booking_url": target_url
                 })
 
-        # 중복 항목 제거
+        # 중복 제거
         seen = set()
         unique_results = []
         for r in cleaned_results:
@@ -101,7 +114,8 @@ def get_live_reservations(subdomain: str = "daebak", yyyymm: str = "202609"):
             "subdomain": subdomain,
             "yyyymm": yyyymm,
             "count": len(unique_results),
-            "data": unique_results
+            "data": unique_results,
+            "debug_sample": html_text[html_text.find("schedule"):html_text.find("schedule")+300] if not unique_results else ""
         }
 
     except Exception as e:
