@@ -1,100 +1,127 @@
 from fastapi import FastAPI, HTTPException
 import requests
+from bs4 import BeautifulSoup
+import re
 import uvicorn
 
 app = FastAPI()
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'X-Requested-With': 'XMLHttpRequest'
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
 @app.get("/api/v1/reservations")
 def get_live_reservations(
     subdomain: str = "seojin", 
-    ship_id: str = "1359", 
     yyyymm: str = "202608",
     debug: bool = False
 ):
-    urls_to_try = [
-        f"https://{subdomain}.sunsang24.com/ship/schedule/{ship_id}?yyyymm={yyyymm}",
-        f"https://{subdomain}.sunsang24.com/ship/event_list?yyyymm={yyyymm}&ship_id={ship_id}",
-        f"https://service.sunsang24.com/v1/customer/event_list/{ship_id}?rows=100&yyyymm={yyyymm}"
-    ]
+    target_url = f"https://{subdomain}.sunsang24.com/?yyyymm={yyyymm}"
     
-    req_headers = HEADERS.copy()
-    req_headers['Referer'] = f"https://{subdomain}.sunsang24.com/"
-    req_headers['Origin'] = f"https://{subdomain}.sunsang24.com"
+    try:
+        response = requests.get(target_url, headers=HEADERS, timeout=10)
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="선사 메인 페이지 접속 실패")
+            
+        html_text = response.text
+        soup = BeautifulSoup(html_text, 'html.parser')
+        
+        # '남은자리' 또는 '바로예약' 키워드가 포함된 HTML 요소 탐색
+        target_elements = soup.find_all(lambda tag: tag.name in ['td', 'div', 'li', 'article'] and ('남은자리' in tag.get_text() or '바로예약' in tag.get_text()))
+        
+        cleaned_results = []
+        raw_snippets = []
 
-    debug_logs = {}
-    formatted_yyyymm = f"{yyyymm[:4]}-{yyyymm[4:6]}"  # 예: "2026-08"
+        year_str = yyyymm[:4]
+        month_str = yyyymm[4:6]
 
-    for target_url in urls_to_try:
-        try:
-            res = requests.get(target_url, headers=req_headers, timeout=6)
-            if res.status_code == 200:
-                try:
-                    data = res.json()
-                    debug_logs[target_url] = data
-                    
-                    raw_list = data.get("data") if isinstance(data, dict) else data
-                    if isinstance(raw_list, list) and len(raw_list) > 0:
-                        cleaned = []
-                        for item in raw_list:
-                            if not isinstance(item, dict):
-                                continue
-                                
-                            # 1. 공지사항 / 팝업 무조건 제외
-                            if item.get("is_notice") is True or item.get("is_popup") is True:
-                                continue
-                                
-                            title = item.get("title") or item.get("fish_type") or item.get("subject") or ""
-                            if "환불" in title or "공지" in title or "안내" in title:
-                                continue
+        for el in target_elements:
+            # 부모 컨테이너로 올라가서 해당 날짜/선박 전체 정보 영역 확보
+            container = el
+            for _ in range(3):
+                if container.parent and container.parent.name in ['td', 'tr', 'div', 'li']:
+                    container = container.parent
+            
+            text = container.get_text(separator=' ', strip=True)
+            raw_snippets.append(text[:150])
 
-                            event_date = item.get("event_sdate") or item.get("sdate") or item.get("date") or ""
-                            # 2. 요청 연월(예: 2026-08)과 일치하지 않는 과거 날짜 제외
-                            if formatted_yyyymm not in event_date:
-                                continue
+            # 1. 날짜 추출 (YYYY-MM-DD 또는 M월 D일 또는 D일)
+            date_str = ""
+            m_full = re.search(r'(\d{4})[.-](\d{1,2})[.-](\d{1,2})', text)
+            m_md = re.search(r'(\d{1,2})월\s*(\d{1,2})일', text)
+            m_d = re.search(r'\b([1-9]|[12][0-9]|3[01])일\b', text)
 
-                            rem_seat = int(item.get("rem_cnt") or item.get("person_rem") or item.get("left_seat") or 0)
-                            max_seat = int(item.get("max_cnt") or item.get("person_limit") or item.get("total_seat") or 0)
-                            price = int(item.get("price") or item.get("person_price") or item.get("fee") or 0)
-                            ship_name = item.get("ship_name") or "신출항호"
-                            
-                            cleaned.append({
-                                "schedule_no": item.get("no") or item.get("ship_schedule_no") or item.get("id"),
-                                "ship_id": ship_id,
-                                "ship_name": ship_name,
-                                "event_date": event_date,
-                                "title": title,
-                                "max_seat": max_seat,
-                                "rem_seat": rem_seat,
-                                "price": price,
-                                "ready": rem_seat > 0 or bool(title),
-                                "booking_url": f"https://{subdomain}.sunsang24.com/"
-                            })
-                        
-                        if cleaned and not debug:
-                            return {
-                                "status": "success",
-                                "subdomain": subdomain,
-                                "ship_id": ship_id,
-                                "yyyymm": yyyymm,
-                                "count": len(cleaned),
-                                "data": cleaned
-                            }
-                except Exception:
-                    debug_logs[target_url] = res.text[:300]
-        except Exception as e:
-            debug_logs[target_url] = str(e)
+            if m_full:
+                date_str = f"{m_full.group(1)}-{int(m_full.group(2)):02d}-{int(m_full.group(3)):02d}"
+            elif m_md:
+                date_str = f"{year_str}-{int(m_md.group(1)):02d}-{int(m_md.group(2)):02d}"
+            elif m_d:
+                date_str = f"{year_str}-{month_str}-{int(m_d.group(1)):02d}"
 
-    return {
-        "status": "debug_mode" if debug else "no_data_filtered",
-        "message": "필터링 후 유효 데이터가 없거나 debug 모드입니다. 아래 각 URL 원본 데이터를 확인하세요.",
-        "debug_logs": debug_logs
-    }
+            # 2. 남은 자릿수 추출
+            rem_seat = 0
+            m_rem = re.search(r'남은자리\s*[:\s]*(\d+)명?', text)
+            if m_rem:
+                rem_seat = int(m_rem.group(1))
+
+            # 3. 어종 / 제목 추출
+            title = ""
+            m_bracket = re.search(r'《\s*([^》]+)\s*》', text)
+            m_fish = re.search(r'어종\s*:\s*([^/|\n\r]+)', text)
+            m_notice = re.search(r'공지사항\s*:\s*([^/|\n\r]+)', text)
+
+            if m_bracket:
+                title = m_bracket.group(1).strip()
+            elif m_fish:
+                title = m_fish.group(1).strip()
+            elif m_notice:
+                title = m_notice.group(1).strip()
+
+            # 4. 선박명 추출
+            ship_name = "신출항호"
+            m_ship = re.search(r'([가-힣A-Za-z0-9]+호)', text)
+            if m_ship:
+                ship_name = m_ship.group(1)
+
+            if date_str and (rem_seat > 0 or title):
+                cleaned_results.append({
+                    "ship_name": ship_name,
+                    "event_date": date_str,
+                    "title": title or "출항 일정",
+                    "rem_seat": rem_seat,
+                    "ready": rem_seat > 0,
+                    "booking_url": target_url
+                })
+
+        # 날짜 및 선박 기준 중복 제거
+        seen = set()
+        unique_results = []
+        for item in cleaned_results:
+            key = (item["event_date"], item["ship_name"])
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(item)
+
+        if debug:
+            return {
+                "status": "debug",
+                "found_elements_count": len(target_elements),
+                "snippets": raw_snippets[:10],
+                "parsed_data": unique_results
+            }
+
+        return {
+            "status": "success",
+            "subdomain": subdomain,
+            "yyyymm": yyyymm,
+            "count": len(unique_results),
+            "data": unique_results
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
